@@ -25,6 +25,58 @@ from pathlib import Path
 WARN_PREFIX = "\u26a0"
 INFO_PREFIX = "\u2139"
 
+_translator = None
+
+
+def init_translator(target_lang: str):
+    global _translator
+    try:
+        from deep_translator import GoogleTranslator
+        _translator = GoogleTranslator(source="auto", target=target_lang)
+    except ImportError:
+        print("Error: deep-translator not installed. Run: pip install deep-translator", file=sys.stderr)
+        sys.exit(1)
+
+
+def _already_in_target_lang(text: str) -> bool:
+    if not _translator:
+        return False
+    target = _translator.target
+    if target.startswith("zh"):
+        ratio = len(re.findall(r"[\u4e00-\u9fff]", text)) / max(len(text), 1)
+        return ratio > 0.3
+    if target == "ja":
+        ratio = len(re.findall(r"[\u3040-\u30ff]", text)) / max(len(text), 1)
+        return ratio > 0.15
+    if target == "ko":
+        ratio = len(re.findall(r"[\uac00-\ud7af]", text)) / max(len(text), 1)
+        return ratio > 0.3
+    return False
+
+
+_translate_cache: dict[str, str] = {}
+
+
+def translate_text(text: str) -> str:
+    if not _translator or not text or not text.strip():
+        return ""
+    cleaned = re.sub(r"https?://\S+", "", text).strip()
+    cleaned = re.sub(r"@[A-Za-z0-9_]+", "", cleaned).strip()
+    if not cleaned:
+        return ""
+    if _already_in_target_lang(cleaned):
+        return ""
+    if cleaned in _translate_cache:
+        return _translate_cache[cleaned]
+    try:
+        result = _translator.translate(cleaned)
+        _translate_cache[cleaned] = result or ""
+        return result or ""
+    except Exception as e:
+        print(f"Translation warning: {e}", file=sys.stderr)
+        _translate_cache[cleaned] = ""
+        return ""
+
 
 def parse_twitter_date(date_str: str) -> str:
     try:
@@ -71,6 +123,10 @@ def render_tweet_block(tweet: dict, indent: str = "") -> list[str]:
     lines.append(f"{indent}>")
     for tline in text.split("\n"):
         lines.append(f"{indent}> {tline}")
+    translated = translate_text(text)
+    if translated:
+        lines.append(f"{indent}>")
+        lines.append(f"{indent}> **[译]** {translated}")
     lines.append(f"{indent}>")
     stats = f"{indent}> Likes: **{likes}** | Retweets: **{retweets}** | Replies: **{replies}**"
     lines.append(stats)
@@ -99,7 +155,12 @@ def render_trending(data: list[dict], title: str = None) -> str:
         post_count = item.get("postCount")
         description = item.get("description", "")
 
-        lines.append(f"## {i}. {headline}")
+        headline_zh = translate_text(headline)
+        if headline_zh and headline_zh != headline:
+            lines.append(f"## {i}. {headline_zh}")
+            lines.append(f"_{headline}_")
+        else:
+            lines.append(f"## {i}. {headline}")
         lines.append("")
 
         meta_parts = []
@@ -114,7 +175,11 @@ def render_trending(data: list[dict], title: str = None) -> str:
             lines.append("")
 
         if description:
-            lines.append(f"_{description}_")
+            desc_zh = translate_text(description)
+            if desc_zh and desc_zh != description:
+                lines.append(f"_{desc_zh}_ ({description})")
+            else:
+                lines.append(f"_{description}_")
             lines.append("")
 
         tweets = item.get("tweets", [])
@@ -214,8 +279,17 @@ def main():
         default="",
         help="Custom title for the Markdown document",
     )
+    parser.add_argument(
+        "--translate",
+        default="",
+        metavar="LANG",
+        help="Translate content to target language (e.g., zh-CN, ja, ko). Requires deep-translator.",
+    )
 
     args = parser.parse_args()
+
+    if args.translate:
+        init_translator(args.translate)
 
     try:
         if args.file:
